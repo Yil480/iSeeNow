@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Docker 构建期间使用的 Maven 配置。
+  仅用于加速依赖下载：把 Maven 中央仓库指向阿里云公共镜像源。
+  不改变任何依赖坐标，只改变下载来源。
+-->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
+  <mirrors>
+    <mirror>
+      <id>aliyun-central</id>
+      <name>Aliyun Maven Central Mirror</name>
+      <url>https://maven.aliyun.com/repository/central</url>
+      <mirrorOf>central</mirrorOf>
+    </mirror>
+  </mirrors>
+</settings>

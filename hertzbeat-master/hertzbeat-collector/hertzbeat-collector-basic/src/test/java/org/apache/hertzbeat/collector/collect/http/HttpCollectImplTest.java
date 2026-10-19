@@ -1,0 +1,718 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.hertzbeat.collector.collect.http;
+
+import com.google.common.collect.Lists;
+import com.sun.net.httpserver.HttpServer;
+import org.apache.hertzbeat.collector.dispatch.DispatchConstants;
+import org.apache.hertzbeat.common.constants.CommonConstants;
+import org.apache.hertzbeat.common.entity.job.Metrics;
+import org.apache.hertzbeat.common.entity.job.protocol.HttpProtocol;
+import org.apache.hertzbeat.common.entity.message.CollectRep;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.lang.reflect.Method;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
+/**
+ * Test case for {@link HttpCollectImpl}
+ */
+class HttpCollectImplTest {
+    private HttpCollectImpl httpCollectImpl;
+
+    @BeforeEach
+    void setUp() {
+        httpCollectImpl = new HttpCollectImpl();
+    }
+
+    @Test
+    void preCheck() {
+        assertThrows(IllegalArgumentException.class, () -> {
+            httpCollectImpl.preCheck(null);
+        });
+
+        assertThrows(IllegalArgumentException.class, () -> {
+            Metrics metrics = Metrics.builder().build();
+            httpCollectImpl.preCheck(metrics);
+        });
+    }
+
+    @Test
+    void collect() {
+        HttpProtocol http = HttpProtocol.builder().build();
+        http.setMethod("POST");
+        Metrics metrics = Metrics.builder()
+                .http(http)
+                .build();
+        CollectRep.MetricsData.Builder builder = CollectRep.MetricsData.newBuilder();
+
+        httpCollectImpl.collect(builder, metrics);
+    }
+
+    @Test
+    void supportProtocol() {
+        String protocol = httpCollectImpl.supportProtocol();
+        assert "http".equals(protocol);
+    }
+
+    @Test
+    void parseResponseByWebsite() {
+        HttpProtocol http = HttpProtocol.builder().build();
+        http.setMethod("GET");
+        http.setHost("http://127.0.0.1");
+        http.setUrl("/");
+        http.setPort("8428");
+        http.setParseType("website");
+        http.setEnableUrlEncoding("true");
+        Metrics metrics = Metrics.builder()
+                .http(http)
+                .aliasFields(Lists.newArrayList("responseTime", "keyword", "statusCode"))
+                .build();
+        CollectRep.MetricsData.Builder builder = CollectRep.MetricsData.newBuilder();
+        httpCollectImpl.collect(builder, metrics);
+
+        assertNotNull(builder.getValuesList());
+        for (CollectRep.ValueRow row : builder.getValuesList()) {
+            assertNotNull(row.getColumns(0));
+            assertEquals(row.getColumns(1), "0");
+            assertEquals(row.getColumns(2), "200");
+        }
+    }
+
+    @Test
+    void parseResponseByXmlPath() throws Exception {
+        // Create a sample XML response
+        String xmlResponse = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <root>
+                    <server>
+                        <name>Server1</name>
+                        <status>Running</status>
+                        <metrics>
+                            <cpu>75.5</cpu>
+                            <memory>1024</memory>
+                            <disk>500</disk>
+                        </metrics>
+                    </server>
+                    <server>
+                        <name>Server2</name>
+                        <status>Stopped</status>
+                        <metrics>
+                            <cpu>0.0</cpu>
+                            <memory>0</memory>
+                            <disk>500</disk>
+                        </metrics>
+                    </server>
+                </root>
+                """;
+    
+        // Set up HttpProtocol with XML path parsing
+        HttpProtocol http = HttpProtocol.builder()
+                .parseType(DispatchConstants.PARSE_XML_PATH)
+                .parseScript("//server")  // XPath to select all server nodes
+                .build();
+    
+        // Set up Metrics with fields that have XPath expressions
+        List<Metrics.Field> fields = new ArrayList<>();
+        fields.add(Metrics.Field.builder().field("name").build());
+        fields.add(Metrics.Field.builder().field("status").build());
+        fields.add(Metrics.Field.builder().field("metrics/cpu").build());
+        fields.add(Metrics.Field.builder().field("metrics/memory").build());
+    
+        Metrics metrics = Metrics.builder()
+                .http(http)
+                .fields(fields)
+                .aliasFields(Arrays.asList("name", "status", "metrics/cpu", "metrics/memory"))
+                .build();
+    
+        // Create a custom builder that captures added rows
+        List<CollectRep.ValueRow> capturedRows = new ArrayList<>();
+        CollectRep.MetricsData.Builder builder = new CollectRep.MetricsData.Builder() {
+            @Override
+            public CollectRep.MetricsData.Builder addValueRow(CollectRep.ValueRow valueRow) {
+                capturedRows.add(valueRow);
+                return super.addValueRow(valueRow);
+            }
+        };
+    
+        // Use reflection to access the private parseResponseByXmlPath method
+        Method parseMethod = HttpCollectImpl.class.getDeclaredMethod(
+                "parseResponseByXmlPath", 
+                String.class, 
+                Metrics.class, 
+                CollectRep.MetricsData.Builder.class, 
+                Long.class);
+        parseMethod.setAccessible(true);
+    
+        // Call the method
+        parseMethod.invoke(httpCollectImpl, xmlResponse, metrics, builder, 100L);
+    
+        // Verify the results
+        assertEquals(2, capturedRows.size(), "Should have parsed 2 server nodes");
+    
+        // Check first server
+        CollectRep.ValueRow firstRow = capturedRows.get(0);
+        assertEquals(4, firstRow.getColumnsCount(), "First row should have 4 columns");
+        assertEquals("Server1", firstRow.getColumns(0), "First server name should be Server1");
+        assertEquals("Running", firstRow.getColumns(1), "First server status should be Running");
+        assertEquals("75.5", firstRow.getColumns(2), "First server CPU should be 75.5");
+        assertEquals("1024", firstRow.getColumns(3), "First server memory should be 1024");
+    
+        // Check second server
+        CollectRep.ValueRow secondRow = capturedRows.get(1);
+        assertEquals(4, secondRow.getColumnsCount(), "Second row should have 4 columns");
+        assertEquals("Server2", secondRow.getColumns(0), "Second server name should be Server2");
+        assertEquals("Stopped", secondRow.getColumns(1), "Second server status should be Stopped");
+        assertEquals("0.0", secondRow.getColumns(2), "Second server CPU should be 0.0");
+        assertEquals("0", secondRow.getColumns(3), "Second server memory should be 0");
+    }
+
+    @Test
+    void parseResponseByXmlPathHonorsXmlEncodingDeclaration() throws Exception {
+        String xmlResponse = """
+                <?xml version="1.0" encoding="ISO-8859-1"?>
+                <root>
+                    <item>
+                        <name>café</name>
+                    </item>
+                </root>
+                """;
+        byte[] responseBytes = xmlResponse.getBytes(StandardCharsets.ISO_8859_1);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/metrics", exchange -> {
+            exchange.getResponseHeaders().add("Content-Type", "application/xml");
+            exchange.sendResponseHeaders(200, responseBytes.length);
+            exchange.getResponseBody().write(responseBytes);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            HttpProtocol http = HttpProtocol.builder()
+                    .method("GET")
+                    .host("127.0.0.1")
+                    .port(String.valueOf(server.getAddress().getPort()))
+                    .url("/metrics")
+                    .parseType(DispatchConstants.PARSE_XML_PATH)
+                    .parseScript("//item")
+                    .build();
+            Metrics metrics = Metrics.builder()
+                    .http(http)
+                    .aliasFields(Lists.newArrayList("name"))
+                    .build();
+            CollectRep.MetricsData.Builder builder = CollectRep.MetricsData.newBuilder();
+
+            httpCollectImpl.collect(builder, metrics);
+
+            assertEquals(1, builder.getValuesCount());
+            assertEquals("café", builder.getValues(0).getColumns(0));
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void parseResponseByXmlPathFallsBackToUtf8ForUnsupportedXmlEncoding() throws Exception {
+        String xmlResponse = """
+                <?xml version="1.0" encoding="UNKNOWN-CHARSET"?>
+                <root>
+                    <item>
+                        <name>service</name>
+                    </item>
+                </root>
+                """;
+        byte[] responseBytes = xmlResponse.getBytes(StandardCharsets.UTF_8);
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/metrics", exchange -> {
+            exchange.getResponseHeaders().add("Content-Type", "application/xml");
+            exchange.sendResponseHeaders(200, responseBytes.length);
+            exchange.getResponseBody().write(responseBytes);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            HttpProtocol http = HttpProtocol.builder()
+                    .method("GET")
+                    .host("127.0.0.1")
+                    .port(String.valueOf(server.getAddress().getPort()))
+                    .url("/metrics")
+                    .parseType(DispatchConstants.PARSE_XML_PATH)
+                    .parseScript("//item")
+                    .build();
+            Metrics metrics = Metrics.builder()
+                    .http(http)
+                    .aliasFields(Lists.newArrayList("name"))
+                    .build();
+            CollectRep.MetricsData.Builder builder = CollectRep.MetricsData.newBuilder();
+
+            httpCollectImpl.collect(builder, metrics);
+
+            assertEquals(1, builder.getValuesCount());
+            assertEquals("service", builder.getValues(0).getColumns(0));
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void parseResponseByJsonPath() throws Exception {
+        String jsonResponse = "{"
+                + "  \"name\": \"jvm.memory.used\","
+                + "  \"description\": \"The amount of used memory\","
+                + "  \"baseUnit\": \"bytes\","
+                + "  \"measurements\": ["
+                + "    {"
+                + "      \"statistic\": \"VALUE\","
+                + "      \"value\": 90282296"
+                + "    }"
+                + "  ],"
+                + "  \"availableTags\": ["
+                + "    {"
+                + "      \"tag\": \"area\","
+                + "      \"values\": ["
+                + "        \"heap\","
+                + "        \"nonheap\""
+                + "      ]"
+                + "    },"
+                + "    {"
+                + "      \"tag\": \"id\","
+                + "      \"values\": ["
+                + "        \"G1 Survivor Space\","
+                + "        \"G1 Eden Space\""
+                + "      ]"
+                + "    }"
+                + "  ]"
+                + "}";
+
+        HttpProtocol http = HttpProtocol.builder()
+                .parseType(DispatchConstants.PARSE_JSON_PATH)
+                .parseScript("$.availableTags[?(@.tag == \"id\")].values[*]")
+                .build();
+        List<CollectRep.ValueRow> capturedRows = new ArrayList<>();
+        CollectRep.MetricsData.Builder builder = new CollectRep.MetricsData.Builder() {
+            @Override
+            public CollectRep.MetricsData.Builder addValueRow(CollectRep.ValueRow valueRow) {
+                capturedRows.add(valueRow);
+                return super.addValueRow(valueRow);
+            }
+        };
+        Method parseMethod = HttpCollectImpl.class.getDeclaredMethod(
+                "parseResponseByJsonPath",
+                String.class,
+                List.class,
+                HttpProtocol.class,
+                CollectRep.MetricsData.Builder.class,
+                Long.class);
+        parseMethod.setAccessible(true);
+
+        // Call the method
+        parseMethod.invoke(httpCollectImpl, jsonResponse, Lists.newArrayList("id"), http, builder, 100L);
+
+        // Verify the results
+        assertEquals(2, capturedRows.size());
+        CollectRep.ValueRow firstRow = capturedRows.get(0);
+        assertEquals("G1 Survivor Space", firstRow.getColumns(0));
+        CollectRep.ValueRow secondRow = capturedRows.get(1);
+        assertEquals("G1 Eden Space", secondRow.getColumns(0));
+
+        // number
+        String numberJson = "{"
+                + "  \"name\": \"system.cpu.usage\","
+                + "  \"description\": \"The \\\"recent cpu usage\\\" of the system the application is running in\","
+                + "  \"measurements\": ["
+                + "    {"
+                + "      \"statistic\": \"VALUE\","
+                + "      \"value\": 0.268751364291017"
+                + "    }"
+                + "  ],"
+                + "  \"availableTags\": []"
+                + "}";
+        http = HttpProtocol.builder()
+                .parseType(DispatchConstants.PARSE_JSON_PATH)
+                .parseScript("$.measurements[?(@.statistic == \"VALUE\")].value")
+                .build();
+        capturedRows.clear();
+        builder = new CollectRep.MetricsData.Builder() {
+            @Override
+            public CollectRep.MetricsData.Builder addValueRow(CollectRep.ValueRow valueRow) {
+                capturedRows.add(valueRow);
+                return super.addValueRow(valueRow);
+            }
+        };
+        parseMethod = HttpCollectImpl.class.getDeclaredMethod(
+                "parseResponseByJsonPath",
+                String.class,
+                List.class,
+                HttpProtocol.class,
+                CollectRep.MetricsData.Builder.class,
+                Long.class);
+        parseMethod.setAccessible(true);
+
+        // Call the method
+        parseMethod.invoke(httpCollectImpl, numberJson, Lists.newArrayList("usage"), http, builder, 100L);
+
+        // Verify the results
+        assertEquals(1, capturedRows.size());
+        firstRow = capturedRows.get(0);
+        assertEquals("0.268751364291017", firstRow.getColumns(0));
+    }
+
+    @Test
+    void parseResponseByJsonPathKeepsRowAlignmentWhenAliasPathMissing() throws Exception {
+        String jsonResponse = "{\"items\": ["
+                + "{\"metadata\": {\"name\": \"pod-a\"}, \"status\": {\"phase\": \"Running\","
+                + " \"containerStatuses\": [{\"name\": \"c1\", \"ready\": true, \"restartCount\": 5}]}},"
+                + "{\"metadata\": {\"name\": \"pod-b-pending\"}, \"status\": {\"phase\": \"Pending\"}},"
+                + "{\"metadata\": {\"name\": \"pod-c\"}, \"status\": {\"phase\": \"Running\","
+                + " \"containerStatuses\": [{\"name\": \"c3\", \"ready\": true, \"restartCount\": 2}]}}"
+                + "]}";
+        HttpProtocol http = HttpProtocol.builder()
+                .parseType(DispatchConstants.PARSE_JSON_PATH)
+                .parseScript("$.items.*")
+                .build();
+        List<CollectRep.ValueRow> capturedRows = new ArrayList<>();
+        CollectRep.MetricsData.Builder builder = new CollectRep.MetricsData.Builder() {
+            @Override
+            public CollectRep.MetricsData.Builder addValueRow(CollectRep.ValueRow valueRow) {
+                capturedRows.add(valueRow);
+                return super.addValueRow(valueRow);
+            }
+        };
+        Method parseMethod = HttpCollectImpl.class.getDeclaredMethod(
+                "parseResponseByJsonPath",
+                String.class,
+                List.class,
+                HttpProtocol.class,
+                CollectRep.MetricsData.Builder.class,
+                Long.class);
+        parseMethod.setAccessible(true);
+
+        parseMethod.invoke(httpCollectImpl, jsonResponse,
+                Lists.newArrayList("$.metadata.name", "$.status.containerStatuses[0].restartCount"), http, builder, 100L);
+
+        assertEquals(3, capturedRows.size());
+        assertEquals("pod-a", capturedRows.get(0).getColumns(0));
+        assertEquals("5", capturedRows.get(0).getColumns(1));
+        assertEquals("pod-b-pending", capturedRows.get(1).getColumns(0));
+        assertEquals(CommonConstants.NULL_VALUE, capturedRows.get(1).getColumns(1));
+        assertEquals("pod-c", capturedRows.get(2).getColumns(0));
+        assertEquals("2", capturedRows.get(2).getColumns(1));
+    }
+
+    @Test
+    void testParsePromQlLabelValue() throws Exception {
+        // Create Prometheus format test data
+        String prometheusData = """
+                {
+                  "status": "success",
+                  "data": {
+                    "resultType": "vector",
+                    "result": [
+                      {
+                        "metric": {
+                          "__name__": "taos_cluster_info_first_ep",
+                          "cluster_id": "590779086215866783",
+                          "instance": "host.docker.internal:6043",
+                          "job": "tdengine",
+                          "value": "localhost:6030"
+                        },
+                        "value": [
+                          1756233177.048,
+                          "1"
+                        ]
+                      }
+                    ]
+                  }
+                }""";
+        List<CollectRep.ValueRow> capturedRows = new ArrayList<>();
+        CollectRep.MetricsData.Builder builder = new CollectRep.MetricsData.Builder() {
+            @Override
+            public CollectRep.MetricsData.Builder addValueRow(CollectRep.ValueRow valueRow) {
+                capturedRows.add(valueRow);
+                return super.addValueRow(valueRow);
+            }
+
+            @Override
+            public String getMetrics() {
+                return "jvm_memory_used_bytes";
+            }
+        };
+        Method parseMethod = HttpCollectImpl.class.getDeclaredMethod(
+                "parseResponseByPromQl",
+                String.class,
+                List.class,
+                HttpProtocol.class,
+                CollectRep.MetricsData.Builder.class);
+        parseMethod.setAccessible(true);
+
+        parseMethod.invoke(httpCollectImpl, prometheusData, Lists.newArrayList("cluster_id", "value"), new HttpProtocol(), builder);
+
+        // Verify the results
+        assertEquals(1, capturedRows.size());
+        CollectRep.ValueRow firstRow = capturedRows.get(0);
+        assertEquals("590779086215866783", firstRow.getColumns(0));
+        assertEquals("localhost:6030", firstRow.getColumns(1));
+    }
+
+    @Test
+    void testParsePromQlMetricValue() throws Exception {
+        // Create Prometheus format test data
+        String prometheusData = """
+                {
+                  "status": "success",
+                  "data": {
+                    "resultType": "vector",
+                    "result": [
+                      {
+                        "metric": {
+                          "__name__": "taos_cluster_info_first_ep",
+                          "cluster_id": "590779086215866783",
+                          "instance": "host.docker.internal:6043",
+                          "job": "tdengine",
+                          "value": "localhost:6030"
+                        },
+                        "value": [
+                          1756233177.048,
+                          "1"
+                        ]
+                      }
+                    ]
+                  }
+                }""";
+        List<CollectRep.ValueRow> capturedRows = new ArrayList<>();
+        CollectRep.MetricsData.Builder builder = new CollectRep.MetricsData.Builder() {
+            @Override
+            public CollectRep.MetricsData.Builder addValueRow(CollectRep.ValueRow valueRow) {
+                capturedRows.add(valueRow);
+                return super.addValueRow(valueRow);
+            }
+
+            @Override
+            public String getMetrics() {
+                return "jvm_memory_used_bytes";
+            }
+        };
+        Method parseMethod = HttpCollectImpl.class.getDeclaredMethod(
+                "parseResponseByPromQl",
+                String.class,
+                List.class,
+                HttpProtocol.class,
+                CollectRep.MetricsData.Builder.class);
+        parseMethod.setAccessible(true);
+
+        parseMethod.invoke(httpCollectImpl, prometheusData, Lists.newArrayList("cluster_id", "value", "metric_value"), new HttpProtocol(), builder);
+
+        // Verify the results
+        assertEquals(1, capturedRows.size());
+        CollectRep.ValueRow firstRow = capturedRows.get(0);
+        assertEquals("590779086215866783", firstRow.getColumns(0));
+        assertEquals("localhost:6030", firstRow.getColumns(1));
+        assertEquals("1", firstRow.getColumns(2));
+    }
+
+    @Test
+    void testParsePromQlValue() throws Exception {
+        // Create Prometheus format test data
+        String prometheusData = """
+                {
+                  "status": "success",
+                  "data": {
+                    "resultType": "vector",
+                    "result": [
+                      {
+                        "metric": {
+                          "__name__": "taos_cluster_info_first_ep",
+                          "cluster_id": "590779086215866783",
+                          "instance": "host.docker.internal:6043",
+                          "job": "tdengine"
+                        },
+                        "value": [
+                          1756233177.048,
+                          "1"
+                        ]
+                      }
+                    ]
+                  }
+                }""";
+        List<CollectRep.ValueRow> capturedRows = new ArrayList<>();
+        CollectRep.MetricsData.Builder builder = new CollectRep.MetricsData.Builder() {
+            @Override
+            public CollectRep.MetricsData.Builder addValueRow(CollectRep.ValueRow valueRow) {
+                capturedRows.add(valueRow);
+                return super.addValueRow(valueRow);
+            }
+
+            @Override
+            public String getMetrics() {
+                return "jvm_memory_used_bytes";
+            }
+        };
+        Method parseMethod = HttpCollectImpl.class.getDeclaredMethod(
+                "parseResponseByPromQl",
+                String.class,
+                List.class,
+                HttpProtocol.class,
+                CollectRep.MetricsData.Builder.class);
+        parseMethod.setAccessible(true);
+
+        parseMethod.invoke(httpCollectImpl, prometheusData, Lists.newArrayList("cluster_id", "value"), new HttpProtocol(), builder);
+
+        // Verify the results
+        assertEquals(1, capturedRows.size());
+        CollectRep.ValueRow firstRow = capturedRows.get(0);
+        assertEquals("590779086215866783", firstRow.getColumns(0));
+        assertEquals("1", firstRow.getColumns(1));
+    }
+
+    @Test
+    void testParsePrometheusLabelValue() throws Exception {
+        // Create Prometheus format test data
+        String prometheusData = """
+                # HELP jvm_memory_used_bytes The amount of used memory in bytes
+                # TYPE jvm_memory_used_bytes gauge
+                jvm_memory_used_bytes{area="heap",value="G1 Survivor Space"} 1048576
+                """;
+        InputStream inputStream = new ByteArrayInputStream(prometheusData.getBytes(StandardCharsets.UTF_8));
+        
+        List<CollectRep.ValueRow> capturedRows = new ArrayList<>();
+        CollectRep.MetricsData.Builder builder = new CollectRep.MetricsData.Builder() {
+            @Override
+            public CollectRep.MetricsData.Builder addValueRow(CollectRep.ValueRow valueRow) {
+                capturedRows.add(valueRow);
+                return super.addValueRow(valueRow);
+            }
+
+            @Override
+            public String getMetrics() {
+                return "jvm_memory_used_bytes";
+            }
+        };
+        Method parseMethod = HttpCollectImpl.class.getDeclaredMethod(
+                "parseResponseByPrometheusExporter",
+                InputStream.class,
+                List.class,
+                CollectRep.MetricsData.Builder.class);
+        parseMethod.setAccessible(true);
+
+        parseMethod.invoke(httpCollectImpl, inputStream, Lists.newArrayList("area", "value"), builder);
+
+        // Verify the results
+        assertEquals(1, capturedRows.size());
+        CollectRep.ValueRow firstRow = capturedRows.get(0);
+        assertEquals("heap", firstRow.getColumns(0));
+        assertEquals("G1 Survivor Space", firstRow.getColumns(1));
+    }
+
+    @Test
+    void testParsePrometheus() throws Exception {
+        // Create Prometheus format test data
+        String prometheusData = """
+                # HELP jvm_memory_used_bytes The amount of used memory
+                # TYPE jvm_memory_used_bytes gauge
+                jvm_memory_used_bytes{area="heap",id="G1 Eden Space"} 1.63577856E8
+                jvm_memory_used_bytes{area="heap",id="G1 Old Gen"} 2.7874304E7
+                jvm_memory_used_bytes{area="heap",id="G1 Survivor Space"} 512032.0
+                jvm_memory_used_bytes{area="nonheap",id="CodeCache"} 1.460288E7
+                jvm_memory_used_bytes{area="nonheap",id="Compressed Class Space"} 5844504.0
+                jvm_memory_used_bytes{area="nonheap",id="Metaspace"} 4.1576344E7
+                """;
+        InputStream inputStream = new ByteArrayInputStream(prometheusData.getBytes(StandardCharsets.UTF_8));
+
+        List<CollectRep.ValueRow> capturedRows = new ArrayList<>();
+        CollectRep.MetricsData.Builder builder = new CollectRep.MetricsData.Builder() {
+            @Override
+            public CollectRep.MetricsData.Builder addValueRow(CollectRep.ValueRow valueRow) {
+                capturedRows.add(valueRow);
+                return super.addValueRow(valueRow);
+            }
+
+            @Override
+            public String getMetrics() {
+                return "jvm_memory_used_bytes";
+            }
+        };
+        Method parseMethod = HttpCollectImpl.class.getDeclaredMethod(
+                "parseResponseByPrometheusExporter",
+                InputStream.class,
+                List.class,
+                CollectRep.MetricsData.Builder.class);
+        parseMethod.setAccessible(true);
+
+        parseMethod.invoke(httpCollectImpl, inputStream, Lists.newArrayList("area", "id"), builder);
+
+        // Verify the results
+        assertEquals(6, capturedRows.size());
+        CollectRep.ValueRow firstRow = capturedRows.get(0);
+        assertEquals("heap", firstRow.getColumns(0));
+        assertEquals("G1 Eden Space", firstRow.getColumns(1));
+        capturedRows.forEach(t -> assertEquals(2, t.getColumnsList().size()));
+    }
+
+    @Test
+    void collectResolvesTimeExpressionsInUrlAndHeaders() throws Exception {
+        AtomicReference<String> requestUri = new AtomicReference<>();
+        AtomicReference<String> yearHeader = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            requestUri.set(exchange.getRequestURI().toString());
+            yearHeader.set(exchange.getRequestHeaders().getFirst("X-Year"));
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            HttpProtocol http = HttpProtocol.builder()
+                    .method("GET")
+                    .host("127.0.0.1")
+                    .port(String.valueOf(server.getAddress().getPort()))
+                    .url("/metrics?year=${@year}")
+                    .headers(Map.of("X-Year", "${@year}"))
+                    .parseType(DispatchConstants.PARSE_DEFAULT)
+                    .build();
+            Metrics metrics = Metrics.builder()
+                    .http(http)
+                    .aliasFields(Lists.newArrayList("responseTime"))
+                    .build();
+            CollectRep.MetricsData.Builder builder = CollectRep.MetricsData.newBuilder();
+
+            httpCollectImpl.collect(builder, metrics);
+
+            String year = String.valueOf(LocalDateTime.now().getYear());
+            assertEquals("/metrics?year=" + year, requestUri.get());
+            assertEquals(year, yearHeader.get());
+        } finally {
+            server.stop(0);
+        }
+    }
+}

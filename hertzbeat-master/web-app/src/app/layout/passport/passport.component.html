@@ -1,0 +1,25 @@
+<div class="container">
+  <header-i18n showLangText="false" class="langs"></header-i18n>
+  <div class="wrap" style="display: flex; flex-direction: column">
+    <div class="top">
+      <div class="head">
+        <img class="logo" src="./assets/brand.svg" alt="" />
+      </div>
+      <div class="desc">{{ 'app.passport.desc' | i18n }}</div>
+    </div>
+    <div nz-row [nzGutter]="16" nzJustify="center">
+      <div nz-col [nzXs]="{ span: 24 }" [nzLg]="{ span: 12 }">
+        <router-outlet></router-outlet>
+      </div>
+    </div>
+    <global-footer style="border-top: 1px solid #b37feb; margin-top: auto">
+      <div style="margin-top: 16px">
+        <span style="color: #b37feb">iSeeNow</span> {{ version }}<br />
+        Copyright &copy; {{ currentYear }}
+        <a href="https://hertzbeat.apache.org" target="_blank" style="color: #b37feb">iSeeNow</a>
+        <br />
+        Licensed under the Apache License, Version 2.0
+      </div>
+    </global-footer>
+  </div>
+</div>

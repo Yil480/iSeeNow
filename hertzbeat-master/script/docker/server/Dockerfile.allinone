@@ -1,0 +1,96 @@
+# ============================================================================
+# HertzBeat 前后端一体化多阶段构建 Dockerfile
+# 构建上下文必须是仓库根目录（包含 web-app/ 与各 hertzbeat-* 模块）：
+#   docker build -t irespsee:allinone -f script/docker/server/Dockerfile.allinone .
+# 阶段：1.前端构建(Node20+pnpm9)  2.后端构建(JDK25+Maven3.9)  3.运行时(JDK25)
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Stage 1: 构建前端 Angular 产物
+# ----------------------------------------------------------------------------
+FROM node:20-bookworm AS frontend
+WORKDIR /app
+
+# 启用 corepack 并固定 pnpm 9（仓库锁文件为 lockfileVersion 9.0）
+RUN corepack enable && corepack prepare pnpm@9 --activate
+
+# 先只拷贝依赖清单，利用 Docker 层缓存加速依赖安装
+COPY web-app/package.json web-app/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+
+# 再拷贝构建所需的源码与配置（不拷贝宿主机 node_modules，避免平台不兼容）
+COPY web-app/angular.json web-app/tsconfig.json web-app/tsconfig.app.json web-app/.browserslistrc ./
+COPY web-app/src ./src
+
+# 执行 Angular 生产构建，产物在 /app/dist
+RUN pnpm run build
+
+# ----------------------------------------------------------------------------
+# Stage 2: 构建后端 Spring Boot 胖 JAR
+# ----------------------------------------------------------------------------
+FROM maven:3.9.11-eclipse-temurin-25 AS backend
+WORKDIR /build
+
+# 拷贝根 POM 与全部 Maven 模块源码（构建上下文中不需要 script/ 目录，
+# checkstyle 已通过 -Dcheckstyle.skip 跳过）
+COPY pom.xml ./
+COPY hertzbeat-base ./hertzbeat-base
+COPY hertzbeat-common-core ./hertzbeat-common-core
+COPY hertzbeat-common-spring ./hertzbeat-common-spring
+COPY hertzbeat-collector ./hertzbeat-collector
+COPY hertzbeat-manager ./hertzbeat-manager
+COPY hertzbeat-warehouse ./hertzbeat-warehouse
+COPY hertzbeat-alerter ./hertzbeat-alerter
+COPY hertzbeat-remoting ./hertzbeat-remoting
+COPY hertzbeat-push ./hertzbeat-push
+COPY hertzbeat-plugin ./hertzbeat-plugin
+COPY hertzbeat-grafana ./hertzbeat-grafana
+COPY hertzbeat-otel ./hertzbeat-otel
+COPY hertzbeat-e2e ./hertzbeat-e2e
+COPY hertzbeat-observability ./hertzbeat-observability
+COPY hertzbeat-ai ./hertzbeat-ai
+COPY hertzbeat-startup ./hertzbeat-startup
+
+# 关键：把前端产物放入 manager 模块 classpath 的 /dist 目录，
+# 与 application.yml 中 static-locations: classpath:/dist/ 对应
+COPY --from=frontend /app/dist ./hertzbeat-manager/src/main/resources/dist
+
+# 使用阿里云镜像源加速依赖下载（仅改变下载来源，不改变依赖坐标）
+COPY script/docker/server/maven-settings.xml /root/.m2/settings.xml
+
+# Maven 打包：JDK 25 由基础镜像满足；跳过测试与代码风格检查
+# 说明：构建容器内可能出现 PKIX path building failed（企业代理/安全软件做 TLS 中间人，
+#       容器 JDK 的 cacerts 不信任其证书链），导致依赖无法下载。这里强制走 wagon 传输
+#       并关闭 HTTPS 证书校验，仅作用于镜像构建阶段，不影响运行时镜像。
+RUN mvn -B clean package -DskipTests -Dcheckstyle.skip=true \
+    -Dmaven.resolver.transport=wagon \
+    -Dmaven.wagon.http.ssl.insecure=true \
+    -Dmaven.wagon.http.ssl.allowall=true \
+    -Dmaven.wagon.http.ssl.ignore.validity.dates=true
+
+# ----------------------------------------------------------------------------
+# Stage 3: 运行时镜像（JDK + 应用 JAR）
+# 说明：默认元数据库 H2 在执行 Flyway 迁移时会调用 H2 的 SourceCompiler 动态
+# 编译 Java 源码，因此运行环境必须带 javac，这里使用 JDK 而非 JRE。
+# ----------------------------------------------------------------------------
+FROM eclipse-temurin:25-jdk AS runtime
+
+ENV TZ=Asia/Shanghai
+ENV LANG=en_US.UTF-8
+# 说明：Arrow（时序库写入依赖）要求显式开放 java.nio 包，否则 MemoryUtil 初始化失败，
+#       导致采集结果校验抛 NoClassDefFoundError、前端"测试连接可用性"一直转圈。
+ENV JAVA_OPTS="-Xms512m -Xmx1024m -Duser.timezone=Asia/Shanghai -Dfile.encoding=UTF-8 -Doracle.jdbc.timezoneAsRegion=false --add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"
+
+WORKDIR /opt/hertzbeat
+
+# 拷贝可执行胖 JAR（已内嵌全部依赖 + 前端页面 + 默认 H2/DuckDB 配置）
+COPY --from=backend /build/hertzbeat-startup/target/apache-hertzbeat-1.9.0.jar /opt/hertzbeat/hertzbeat.jar
+
+# H2 元数据库与 DuckDB 历史数据均写入工作目录下的 data/
+RUN mkdir -p /opt/hertzbeat/data
+VOLUME ["/opt/hertzbeat/data"]
+
+# 1157: Web/API   1158: 调度服务   14317: OTLP/gRPC 接入
+EXPOSE 1157 1158 14317
+
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar /opt/hertzbeat/hertzbeat.jar"]

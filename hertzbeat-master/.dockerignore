@@ -1,0 +1,29 @@
+# Docker 构建上下文排除规则
+# 目的：避免把体积巨大的依赖目录、构建产物、本地数据传给 Docker 守护进程
+
+# 前端依赖（镜像内 pnpm install 重新安装）
+**/node_modules
+
+# Maven 各模块构建产物（镜像内 mvnw 重新编译）
+**/target
+# 例外：保留本机已打好的可执行 JAR，供 script/docker/server/Dockerfile（非一体化版）使用
+!hertzbeat-startup/target
+!hertzbeat-startup/target/apache-hertzbeat-1.9.0.jar
+
+# 前端构建产物（一体化 Dockerfile 在镜像内重新构建）
+web-app/dist
+
+# 本地运行时数据与日志
+data
+**/logs
+
+# 编辑器 / 版本控制 / 依赖缓存
+.git
+.gitignore
+.idea
+.vscode
+.scannerwork
+
+# 其他与构建无关的目录
+web-app/coverage
+web-app/.angular

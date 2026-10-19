@@ -1,0 +1,66 @@
+# ============================================================
+# iSeeNow (hertzbeat) 仓库忽略规则
+# 原则：只提交源码、配置、脚本、文档
+#       不提交依赖目录、构建产物、运行时数据、IDE 文件
+# ============================================================
+
+# ---------- 前端依赖 ----------
+**/node_modules/
+**/.pnpm-store/
+**/bower_components/
+
+# ---------- 前端构建产物与缓存 ----------
+**/.angular/
+**/dist/
+**/dist.bak-*/
+**/coverage/
+**/.cache/
+**/.vite/
+**/storybook-static/
+
+# ---------- Maven / Java 构建产物 ----------
+**/target/
+**/*.class
+**/*.war
+**/.flattened-pom.xml
+**/dependency-reduced-pom.xml
+release.properties
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+
+# ---------- 前端产物拷贝到后端后的目录（可由构建重新生成） ----------
+hertzbeat-master/hertzbeat-startup/src/main/resources/static/
+hertzbeat-master/hertzbeat-startup/src/main/resources/static.bak/
+hertzbeat-master/script/docker/server/fe-dist/
+
+# ---------- 运行时数据与日志 ----------
+**/logs/
+**/*.log
+**/hs_err_pid*
+**/*.hprof
+hertzbeat-master/data/
+hertzbeat-master/output/
+**/dbdata/
+**/pgdata/
+
+# ---------- IDE / 编辑器 ----------
+**/.idea/
+**/*.iml
+**/*.ipr
+**/*.iws
+**/.vscode/
+**/.settings/
+**/.project
+**/.classpath
+**/.factorypath
+**/*.swp
+**/*~
+
+# ---------- 系统文件 ----------
+**/.DS_Store
+**/Thumbs.db
+**/desktop.ini
+
+# ---------- 工具本地工作目录 ----------
+.workbuddy/
